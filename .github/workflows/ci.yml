@@ -1,0 +1,55 @@
+name: CI
+
+# Dieser Fork haengt an einem reverse-engineerten Protokoll und einem
+# Upstream, der nicht mehr gepflegt wird. Der woechentliche Lauf ist der
+# Frueherkennungsmechanismus dafuer, dass eine Abhaengigkeit bricht.
+on:
+  push:
+    branches: [hardening, main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  bridge:
+    name: Go bridge
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: whatsapp-bridge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: whatsapp-bridge/go.sum
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race ./...
+
+      - name: Vulnerability scan
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  server:
+    name: Python MCP server
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: whatsapp-mcp-server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Syntax check
+        run: python -m compileall -q .

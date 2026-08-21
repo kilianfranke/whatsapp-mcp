@@ -17,6 +17,10 @@ Der Upstream ist unbetreibbar: er verbindet sich nicht mehr, und dort wo er es t
 | 6 | Sendemodus, Empfänger-Whitelist, Rate Limit, Audit-Log | Eingehende Nachrichten sind nicht vertrauenswürdiger Input. Ohne Gate kann Prompt Injection den Agenten zum Senden bringen. |
 | 7 | Gesendete Nachrichten persistieren, Last-Message-JOIN korrigiert, drei Indizes | Eigene Sendungen fehlten in der DB, wodurch Auto-Reply-Schleifen dieselbe Nachricht endlos beantworteten. |
 | 8 | Alle Abhängigkeiten aktualisiert | `govulncheck` meldet jetzt null erreichbare Schwachstellen. |
+| 9 | Start bricht ab, wenn `SEND_MODE=confirm` ohne Terminal gesetzt ist | Sonst läuft die Bridge scheinbar normal und lehnt jeden Versand am nicht lesbaren Prompt ab. |
+| 10 | Sendekontingent überlebt Neustarts | Ein In-Memory-Limit setzt sich bei jedem Absturz zurück, und genau dieses Limit schützt den einzigen belegten Ban-Pfad. |
+| 11 | Audit-Log rotiert bei 5 MB, Warnung bei Bind ausserhalb Loopback | Das forensische Log wuchs unbegrenzt, und ein abweichender Bind blieb unkommentiert. |
+| 12 | CI: Build, Vet, Test mit `-race`, `govulncheck`, wöchentlich | Früherkennung, wenn eine Abhängigkeit oder das Protokoll bricht. |
 
 ## Konfiguration
 
@@ -39,6 +43,7 @@ Empfohlener Start für den Lesebetrieb: nichts setzen. Der Default blockiert Ver
 
 ## Was weiterhin offen ist
 
-- Die SQLite-Datenbanken sind unverschlüsselt. Wer Dateizugriff hat, hat die Historie.
+- Die SQLite-Datenbanken sind unverschlüsselt. Wer Dateizugriff hat, hat die Historie. Bewusst nicht gepatcht: SQLCipher wäre ein Umbau der gesamten Datenschicht, FileVault löst dasselbe Problem ausserhalb dieses Repos.
+- Das Sende-Gate verengt Prompt Injection, es löst sie nicht. Gegated ist nur der Rückweg über WhatsApp.
 - Die Nutzung verstösst gegen die WhatsApp-Nutzungsbedingungen. Das ist nicht patchbar.
 - Der Upstream wird nicht gepflegt. Bricht das Protokoll, muss dieser Fork selbst nachziehen.

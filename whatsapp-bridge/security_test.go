@@ -167,3 +167,75 @@ func TestDeniedConfirmationDoesNotConsumeQuota(t *testing.T) {
 		t.Fatalf("expected 2 consumed slots, got %d", len(sendHistory))
 	}
 }
+
+func TestConfirmModeRequiresTerminal(t *testing.T) {
+	// Im Test ist stdin kein TTY, "confirm" muss daher beim Start abbrechen.
+	t.Setenv(sendModeEnv, sendConfirm)
+	if err := checkSendModeUsable(); err == nil {
+		t.Fatal("confirm mode without a TTY must be refused at startup")
+	}
+
+	t.Setenv(sendModeEnv, sendAllow)
+	if err := checkSendModeUsable(); err != nil {
+		t.Fatalf("allow mode must not require a TTY: %v", err)
+	}
+}
+
+func TestSendHistorySurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	old, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(old) })
+
+	t.Setenv(sendModeEnv, sendAllow)
+	t.Setenv(sendRateEnv, "2")
+	t.Setenv(allowJIDsEnv, "")
+	sendHistory = nil
+
+	for i := 0; i < 2; i++ {
+		if err := authorizeSend("peer@s.whatsapp.net", "hi", ""); err != nil {
+			t.Fatalf("send %d should pass: %v", i+1, err)
+		}
+	}
+
+	// Neustart simulieren: Speicher leeren, Zustand von der Platte laden.
+	sendHistory = nil
+	loadSendHistory()
+	if len(sendHistory) != 2 {
+		t.Fatalf("quota must survive a restart, got %d entries", len(sendHistory))
+	}
+	if err := authorizeSend("peer@s.whatsapp.net", "hi", ""); err == nil {
+		t.Fatal("quota was reset by the restart")
+	}
+}
+
+func TestAuditLogRotates(t *testing.T) {
+	dir := t.TempDir()
+	old, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(old) })
+
+	if err := os.MkdirAll("store", 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(auditLogFile, make([]byte, auditMaxBytes+1), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	audit("TRIGGER rotation")
+
+	if _, err := os.Stat(auditLogFile + ".1"); err != nil {
+		t.Fatalf("oversized log must be rotated: %v", err)
+	}
+	info, err := os.Stat(auditLogFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() >= auditMaxBytes {
+		t.Fatal("fresh log must start small after rotation")
+	}
+}

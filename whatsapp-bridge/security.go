@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -17,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/term"
 )
 
 const (
@@ -27,6 +30,10 @@ const (
 	mediaRootEnv = "WHATSAPP_BRIDGE_MEDIA_ROOTS"
 	sendRateEnv  = "WHATSAPP_BRIDGE_MAX_SENDS_PER_HOUR"
 	auditLogFile = "store/audit.log"
+	sendStateFile = "store/send_history.json"
+
+	// Ab dieser Groesse wird das Audit-Log einmal rotiert.
+	auditMaxBytes = 5 << 20
 )
 
 // Sendemodus. Default ist bewusst "off": eine eingehende WhatsApp-Nachricht ist
@@ -157,6 +164,26 @@ func validateMediaPath(path string) (string, error) {
 		path, strings.Join(mediaRoots(), ":"), mediaRootEnv)
 }
 
+// stdinIsTerminal meldet, ob eine Eingabe ueberhaupt moeglich ist.
+// Eine Pruefung auf ModeCharDevice reicht nicht: /dev/null ist ebenfalls ein
+// Character Device, und genau darauf zeigt stdin unter launchd. Die Pruefung
+// haette also ausgerechnet den Fall verfehlt, fuer den sie gedacht ist.
+func stdinIsTerminal() bool {
+	return term.IsTerminal(int(os.Stdin.Fd()))
+}
+
+// checkSendModeUsable bricht beim Start ab, wenn "confirm" ohne Terminal
+// gesetzt ist. Sonst laeuft die Bridge scheinbar normal, lehnt aber jeden
+// Versand am nicht lesbaren Prompt ab, und das faellt erst im Betrieb auf.
+func checkSendModeUsable() error {
+	if sendMode() == sendConfirm && !stdinIsTerminal() {
+		return fmt.Errorf("%s=confirm needs an interactive terminal, but stdin is not a TTY; "+
+			"run the bridge in the foreground, or use %s=allow together with %s",
+			sendModeEnv, sendModeEnv, allowJIDsEnv)
+	}
+	return nil
+}
+
 func sendMode() string {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(sendModeEnv))) {
 	case sendAllow:
@@ -189,6 +216,44 @@ func jidAllowed(recipient string) bool {
 		}
 	}
 	return false
+}
+
+// loadSendHistory stellt das Sendefenster nach einem Neustart wieder her.
+// Ohne Persistenz setzt jeder Neustart das Kontingent zurueck, und genau das
+// Limit schuetzt vor dem einzigen belegten Ban-Pfad.
+func loadSendHistory() {
+	sendMu.Lock()
+	defer sendMu.Unlock()
+
+	data, err := os.ReadFile(sendStateFile)
+	if err != nil {
+		return
+	}
+	var stamps []time.Time
+	if err := json.Unmarshal(data, &stamps); err != nil {
+		return
+	}
+	sendHistory = stamps
+	pruneSendHistory()
+}
+
+// saveSendHistory schreibt das Fenster zurueck. Aufrufer hält sendMu.
+func saveSendHistory() {
+	if err := os.MkdirAll(filepath.Dir(sendStateFile), 0700); err != nil {
+		return
+	}
+	data, err := json.Marshal(sendHistory)
+	if err != nil {
+		return
+	}
+	// Atomar ersetzen, damit ein Absturz keine halbe Datei hinterlaesst.
+	tmp := sendStateFile + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return
+	}
+	if err := os.Rename(tmp, sendStateFile); err != nil {
+		os.Remove(tmp)
+	}
 }
 
 // pruneSendHistory verwirft Einträge älter als eine Stunde. Aufrufer hält sendMu.
@@ -229,6 +294,7 @@ func rateLimitConsume() {
 
 	pruneSendHistory()
 	sendHistory = append(sendHistory, time.Now())
+	saveSendHistory()
 }
 
 // confirmSend fragt im Terminal nach, bevor gesendet wird.
@@ -301,6 +367,11 @@ func audit(format string, args ...interface{}) {
 	if err := os.MkdirAll(filepath.Dir(auditLogFile), 0700); err != nil {
 		return
 	}
+	// Einmalige Rotation, damit das forensische Log nicht unbegrenzt waechst.
+	if info, err := os.Stat(auditLogFile); err == nil && info.Size() >= auditMaxBytes {
+		os.Rename(auditLogFile, auditLogFile+".1")
+	}
+
 	f, err := os.OpenFile(auditLogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return

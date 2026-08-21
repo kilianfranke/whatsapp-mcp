@@ -717,6 +717,17 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	}
 	apiKey = key
 
+	// Fehlkonfiguration lieber sofort abbrechen als still im Betrieb auffallen.
+	if err := checkSendModeUsable(); err != nil {
+		fmt.Printf("FATAL: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Sendekontingent des letzten Fensters wiederherstellen.
+	loadSendHistory()
+
+	fmt.Printf("Send mode: %s | media roots: %s\n", sendMode(), strings.Join(mediaRoots(), ":"))
+
 	// Handler for sending messages
 	http.HandleFunc("/api/send", requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
@@ -831,6 +842,11 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	bindHost := os.Getenv("WHATSAPP_BRIDGE_BIND")
 	if bindHost == "" {
 		bindHost = "127.0.0.1"
+	}
+	if bindHost != "127.0.0.1" && bindHost != "localhost" && bindHost != "::1" {
+		fmt.Printf("WARNING: binding to %s exposes this bridge beyond localhost. "+
+			"Anyone who reaches it and holds the API key can send from your account.\n", bindHost)
+		audit("BIND_NON_LOOPBACK host=%s", bindHost)
 	}
 	serverAddr := fmt.Sprintf("%s:%d", bindHost, port)
 	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
