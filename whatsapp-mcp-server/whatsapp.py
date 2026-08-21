@@ -8,7 +8,34 @@ import json
 import audio
 
 MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
-WHATSAPP_API_BASE_URL = "http://localhost:8080/api"
+WHATSAPP_API_BASE_URL = os.environ.get("WHATSAPP_API_BASE_URL", "http://127.0.0.1:8080/api")
+API_KEY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'api_key')
+
+# Obergrenzen fuer Abfragen. Ohne sie kann ein einziger Tool-Call die komplette
+# Chat-Historie in den Kontext ziehen, was bei Prompt Injection den Schaden maximiert.
+MAX_LIMIT = 200
+REQUEST_TIMEOUT = 30
+
+
+def _auth_headers() -> dict:
+    """API-Key der Bridge lesen. Ohne ihn weist die Bridge jede Anfrage ab."""
+    key = os.environ.get("WHATSAPP_BRIDGE_API_KEY", "")
+    if not key:
+        try:
+            with open(API_KEY_PATH) as handle:
+                key = handle.read().strip()
+        except OSError:
+            return {}
+    return {"X-API-Key": key} if key else {}
+
+
+def _clamp(limit: int) -> int:
+    """Limit auf MAX_LIMIT begrenzen und negative Werte abfangen."""
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        return 20
+    return max(1, min(limit, MAX_LIMIT))
 
 @dataclass
 class Message:
@@ -182,7 +209,7 @@ def list_messages(
         offset = page * limit
         query_parts.append("ORDER BY messages.timestamp DESC")
         query_parts.append("LIMIT ? OFFSET ?")
-        params.extend([limit, offset])
+        params.extend([_clamp(limit), offset])
         
         cursor.execute(" ".join(query_parts), tuple(params))
         messages = cursor.fetchall()
@@ -342,8 +369,10 @@ def list_chats(
         
         if include_last_message:
             query_parts.append("""
-                LEFT JOIN messages ON chats.jid = messages.chat_jid 
-                AND chats.last_message_time = messages.timestamp
+                LEFT JOIN messages ON messages.chat_jid = chats.jid
+                AND messages.timestamp = (
+                    SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.chat_jid = chats.jid
+                )
             """)
             
         where_clauses = []
@@ -355,7 +384,12 @@ def list_chats(
             
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
-            
+
+        if include_last_message:
+            # Faengt den Restfall ab, dass mehrere Nachrichten exakt denselben
+            # Maximal-Timestamp tragen und der Chat sonst doppelt erscheint.
+            query_parts.append("GROUP BY chats.jid")
+
         # Add sorting
         order_by = "chats.last_message_time DESC" if sort_by == "last_active" else "chats.name"
         query_parts.append(f"ORDER BY {order_by}")
@@ -363,7 +397,7 @@ def list_chats(
         # Add pagination
         offset = (page ) * limit
         query_parts.append("LIMIT ? OFFSET ?")
-        params.extend([limit, offset])
+        params.extend([_clamp(limit), offset])
         
         cursor.execute(" ".join(query_parts), tuple(params))
         chats = cursor.fetchall()
@@ -457,7 +491,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
             WHERE m.sender = ? OR c.jid = ?
             ORDER BY c.last_message_time DESC
             LIMIT ? OFFSET ?
-        """, (jid, jid, limit, page * limit))
+        """, (jid, jid, _clamp(limit), page * limit))
         
         chats = cursor.fetchall()
         
@@ -634,7 +668,7 @@ def send_message(recipient: str, message: str) -> Tuple[bool, str]:
             "message": message,
         }
         
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, headers=_auth_headers(), timeout=REQUEST_TIMEOUT)
         
         # Check if the request was successful
         if response.status_code == 200:
@@ -668,7 +702,7 @@ def send_file(recipient: str, media_path: str) -> Tuple[bool, str]:
             "media_path": media_path
         }
         
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, headers=_auth_headers(), timeout=REQUEST_TIMEOUT)
         
         # Check if the request was successful
         if response.status_code == 200:
@@ -708,7 +742,7 @@ def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
             "media_path": media_path
         }
         
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, headers=_auth_headers(), timeout=REQUEST_TIMEOUT)
         
         # Check if the request was successful
         if response.status_code == 200:
@@ -741,7 +775,7 @@ def download_media(message_id: str, chat_jid: str) -> Optional[str]:
             "chat_jid": chat_jid
         }
         
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, headers=_auth_headers(), timeout=REQUEST_TIMEOUT)
         
         if response.status_code == 200:
             result = response.json()

@@ -1,3 +1,16 @@
+# Laufzeitdaten der Bridge. Enthaelt die WhatsApp-Session, den API-Key,
+# das Audit-Log und die komplette Chat-Historie im Klartext.
+whatsapp-bridge/store/
+store/
 *.db
+*.db-journal
+*.db-wal
+
+# Kompiliertes Binary
+whatsapp-bridge/whatsapp-client
+
 claude_desktop_config.json
 whatsapp.log
+.DS_Store
+__pycache__/
+.venv/

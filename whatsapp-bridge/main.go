@@ -84,6 +84,11 @@ func NewMessageStore() (*MessageStore, error) {
 			PRIMARY KEY (id, chat_jid),
 			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
 		);
+
+		-- Ohne diese Indizes scannt jede Suche des MCP-Servers die gesamte Historie.
+		CREATE INDEX IF NOT EXISTS idx_messages_chat_time ON messages(chat_jid, timestamp DESC);
+		CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp DESC);
+		CREATE INDEX IF NOT EXISTS idx_chats_last_message_time ON chats(last_message_time DESC);
 	`)
 	if err != nil {
 		db.Close()
@@ -203,7 +208,7 @@ type SendMessageRequest struct {
 }
 
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string) (bool, string) {
+func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string) (bool, string) {
 	if !client.IsConnected() {
 		return false, "Not connected to WhatsApp"
 	}
@@ -233,6 +238,14 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 
 	// Check if we have media to send
 	if mediaPath != "" {
+		// Pfad gegen die Allowlist prüfen. Ungeprüft liest dieser Aufruf jede
+		// Datei des Systems und verschickt sie an eine beliebige Nummer.
+		safePath, err := validateMediaPath(mediaPath)
+		if err != nil {
+			return false, fmt.Sprintf("Error reading media file: %v", err)
+		}
+		mediaPath = safePath
+
 		// Read media file
 		mediaData, err := os.ReadFile(mediaPath)
 		if err != nil {
@@ -362,12 +375,31 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 	}
 
 	// Send message
-	_, err = client.SendMessage(context.Background(), recipientJID, msg)
+	resp, err := client.SendMessage(context.Background(), recipientJID, msg)
 
 	if err != nil {
 		return false, fmt.Sprintf("Error sending message: %v", err)
 	}
 
+	// Eigene Nachricht persistieren. Der Upstream tat das nicht, wodurch der
+	// MCP-Server seine eigenen Sendungen nie sah und Auto-Reply-Schleifen
+	// dieselbe eingehende Nachricht endlos beantworteten.
+	if messageStore != nil {
+		chatJID := recipientJID.String()
+		if err := messageStore.StoreChat(chatJID, recipient, resp.Timestamp); err != nil {
+			fmt.Printf("Warning: failed to store chat for sent message: %v\n", err)
+		}
+		mediaType, filename := "", ""
+		if mediaPath != "" {
+			mediaType, filename = "document", filepath.Base(mediaPath)
+		}
+		if err := messageStore.StoreMessage(resp.ID, chatJID, "", message, resp.Timestamp, true,
+			mediaType, filename, "", nil, nil, nil, 0); err != nil {
+			fmt.Printf("Warning: failed to store sent message: %v\n", err)
+		}
+	}
+
+	audit("SEND_OK recipient=%s id=%s", recipient, resp.ID)
 	return true, fmt.Sprintf("Message sent to %s", recipient)
 }
 
@@ -379,19 +411,19 @@ func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, 
 
 	// Check for image message
 	if img := msg.GetImageMessage(); img != nil {
-		return "image", "image_" + time.Now().Format("20060102_150405") + ".jpg",
+		return "image", "image_" + mediaStamp() + ".jpg",
 			img.GetURL(), img.GetMediaKey(), img.GetFileSHA256(), img.GetFileEncSHA256(), img.GetFileLength()
 	}
 
 	// Check for video message
 	if vid := msg.GetVideoMessage(); vid != nil {
-		return "video", "video_" + time.Now().Format("20060102_150405") + ".mp4",
+		return "video", "video_" + mediaStamp() + ".mp4",
 			vid.GetURL(), vid.GetMediaKey(), vid.GetFileSHA256(), vid.GetFileEncSHA256(), vid.GetFileLength()
 	}
 
 	// Check for audio message
 	if aud := msg.GetAudioMessage(); aud != nil {
-		return "audio", "audio_" + time.Now().Format("20060102_150405") + ".ogg",
+		return "audio", "audio_" + mediaStamp() + ".ogg",
 			aud.GetURL(), aud.GetMediaKey(), aud.GetFileSHA256(), aud.GetFileEncSHA256(), aud.GetFileLength()
 	}
 
@@ -399,7 +431,7 @@ func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, 
 	if doc := msg.GetDocumentMessage(); doc != nil {
 		filename := doc.GetFileName()
 		if filename == "" {
-			filename = "document_" + time.Now().Format("20060102_150405")
+			filename = "document_" + mediaStamp()
 		}
 		return "document", filename,
 			doc.GetURL(), doc.GetMediaKey(), doc.GetFileSHA256(), doc.GetFileEncSHA256(), doc.GetFileLength()
@@ -641,7 +673,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	}
 
 	// Download the media using whatsmeow client
-	mediaData, err := client.Download(downloader)
+	mediaData, err := client.Download(context.Background(), downloader)
 	if err != nil {
 		return false, "", "", "", fmt.Errorf("failed to download media: %v", err)
 	}
@@ -668,17 +700,25 @@ func extractDirectPathFromURL(url string) string {
 
 	pathPart := parts[1]
 
-	// Remove query parameters
-	pathPart = strings.SplitN(pathPart, "?", 2)[0]
-
-	// Create proper direct path format
+	// Query-String bewusst erhalten. whatsmeow hängt "&hash=...&mms-type=..."
+	// direkt an den DirectPath an und setzt dabei voraus, dass dieser bereits
+	// mit einem gültigen Query-String endet. Wird er gestrippt, entsteht eine
+	// URL ohne "?" und Metas CDN antwortet auf jeden Download mit 403.
 	return "/" + pathPart
 }
 
 // Start a REST API server to expose the WhatsApp client functionality
 func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
+	// API-Key laden bzw. erzeugen, bevor irgendein Handler registriert wird.
+	key, err := loadAPIKey()
+	if err != nil {
+		fmt.Printf("FATAL: %v\n", err)
+		os.Exit(1)
+	}
+	apiKey = key
+
 	// Handler for sending messages
-	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/api/send", requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -703,10 +743,21 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			return
 		}
 
+		// Approval-Gate, Empfänger-Whitelist und Rate Limit.
+		if err := authorizeSend(req.Recipient, req.Message, req.MediaPath); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(SendMessageResponse{
+				Success: false,
+				Message: err.Error(),
+			})
+			return
+		}
+
 		fmt.Println("Received request to send message", req.Message, req.MediaPath)
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
+		success, message := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, req.MediaPath)
 		fmt.Println("Message sent", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
@@ -721,10 +772,10 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			Success: success,
 			Message: message,
 		})
-	})
+	}))
 
 	// Handler for downloading media
-	http.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/api/download", requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -772,10 +823,16 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			Filename: filename,
 			Path:     path,
 		})
-	})
+	}))
 
-	// Start the server
-	serverAddr := fmt.Sprintf(":%d", port)
+	// Start the server.
+	// Bind bewusst nur auf Loopback: der Upstream lauschte auf 0.0.0.0, womit
+	// jeder im selben Netzwerk ohne Auth aus diesem Account senden konnte.
+	bindHost := os.Getenv("WHATSAPP_BRIDGE_BIND")
+	if bindHost == "" {
+		bindHost = "127.0.0.1"
+	}
+	serverAddr := fmt.Sprintf("%s:%d", bindHost, port)
 	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
 
 	// Run server in a goroutine so it doesn't block
@@ -800,14 +857,14 @@ func main() {
 		return
 	}
 
-	container, err := sqlstore.New("sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
+	container, err := sqlstore.New(context.Background(), "sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
 		return
 	}
 
 	// Get device store - This contains session information
-	deviceStore, err := container.GetFirstDevice()
+	deviceStore, err := container.GetFirstDevice(context.Background())
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// No device exists, create one
@@ -973,7 +1030,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 
 		// If we didn't get a name, try group info
 		if name == "" {
-			groupInfo, err := client.GetGroupInfo(jid)
+			groupInfo, err := client.GetGroupInfo(context.Background(), jid)
 			if err == nil && groupInfo.Name != "" {
 				name = groupInfo.Name
 			} else {
@@ -987,9 +1044,20 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 		// This is an individual contact
 		logger.Infof("Getting name for contact: %s", chatJID)
 
+		// LID auf die Telefonnummer zurückführen, bevor der Kontakt gesucht wird.
+		lookupJID := jid
+		if jid.Server == "lid" {
+			if pn, err := client.Store.LIDs.GetPNForLID(context.Background(), jid); err == nil && !pn.IsEmpty() {
+				logger.Infof("Resolved LID %s to %s", jid, pn)
+				lookupJID = pn
+			}
+		}
+
 		// Just use contact info (full name)
-		contact, err := client.Store.Contacts.GetContact(jid)
+		contact, err := client.Store.Contacts.GetContact(context.Background(), lookupJID)
 		if err == nil && contact.FullName != "" {
+			name = contact.FullName
+		} else if contact, err := client.Store.Contacts.GetContact(context.Background(), jid); err == nil && contact.FullName != "" {
 			name = contact.FullName
 		} else if sender != "" {
 			// Fallback to sender
