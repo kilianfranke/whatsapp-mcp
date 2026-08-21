@@ -142,3 +142,28 @@ func TestMediaStampIsUnique(t *testing.T) {
 		seen[s] = true
 	}
 }
+
+func TestDeniedConfirmationDoesNotConsumeQuota(t *testing.T) {
+	// Ein am Prompt abgelehnter Versand darf kein Kontingent kosten.
+	t.Setenv(sendModeEnv, sendAllow)
+	t.Setenv(sendRateEnv, "2")
+	t.Setenv(allowJIDsEnv, "friend@s.whatsapp.net")
+	sendHistory = nil
+
+	// Ablehnung durch die Whitelist passiert vor dem Verbrauch.
+	if err := authorizeSend("stranger@s.whatsapp.net", "hi", ""); err == nil {
+		t.Fatal("stranger must be rejected")
+	}
+	if len(sendHistory) != 0 {
+		t.Fatalf("rejected send must not consume quota, history has %d entries", len(sendHistory))
+	}
+
+	for i := 0; i < 2; i++ {
+		if err := authorizeSend("friend@s.whatsapp.net", "hi", ""); err != nil {
+			t.Fatalf("send %d should pass: %v", i+1, err)
+		}
+	}
+	if len(sendHistory) != 2 {
+		t.Fatalf("expected 2 consumed slots, got %d", len(sendHistory))
+	}
+}

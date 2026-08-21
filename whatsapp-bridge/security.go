@@ -191,17 +191,8 @@ func jidAllowed(recipient string) bool {
 	return false
 }
 
-// rateLimitOK begrenzt das Sendevolumen. Massenversand an Nicht-Kontakte ist
-// der einzige belegte Weg, sich den WhatsApp-Account sperren zu lassen.
-func rateLimitOK() (bool, int) {
-	limit := maxSendsPerHour()
-	if limit == 0 {
-		return true, 0
-	}
-
-	sendMu.Lock()
-	defer sendMu.Unlock()
-
+// pruneSendHistory verwirft Einträge älter als eine Stunde. Aufrufer hält sendMu.
+func pruneSendHistory() {
 	cutoff := time.Now().Add(-time.Hour)
 	kept := sendHistory[:0]
 	for _, t := range sendHistory {
@@ -210,12 +201,34 @@ func rateLimitOK() (bool, int) {
 		}
 	}
 	sendHistory = kept
+}
 
-	if len(sendHistory) >= limit {
-		return false, limit
+// rateLimitAvailable prüft das Kontingent, ohne es zu verbrauchen.
+func rateLimitAvailable() (bool, int) {
+	limit := maxSendsPerHour()
+	if limit == 0 {
+		return true, 0
 	}
+
+	sendMu.Lock()
+	defer sendMu.Unlock()
+
+	pruneSendHistory()
+	return len(sendHistory) < limit, limit
+}
+
+// rateLimitConsume bucht einen Sendevorgang. Getrennt vom Prüfen, damit eine
+// am Bestätigungsprompt abgelehnte Nachricht kein Kontingent kostet.
+func rateLimitConsume() {
+	if maxSendsPerHour() == 0 {
+		return
+	}
+
+	sendMu.Lock()
+	defer sendMu.Unlock()
+
+	pruneSendHistory()
 	sendHistory = append(sendHistory, time.Now())
-	return true, limit
 }
 
 // confirmSend fragt im Terminal nach, bevor gesendet wird.
@@ -262,7 +275,7 @@ func authorizeSend(recipient, message, mediaPath string) error {
 		return fmt.Errorf("recipient %s is not in %s", recipient, allowJIDsEnv)
 	}
 
-	if ok, limit := rateLimitOK(); !ok {
+	if ok, limit := rateLimitAvailable(); !ok {
 		audit("SEND_BLOCKED_RATE recipient=%s limit=%d", recipient, limit)
 		return fmt.Errorf("rate limit reached (%d sends per hour); raise %s to change", limit, sendRateEnv)
 	}
@@ -271,6 +284,9 @@ func authorizeSend(recipient, message, mediaPath string) error {
 		audit("SEND_DENIED_BY_USER recipient=%s", recipient)
 		return fmt.Errorf("send denied at the approval prompt")
 	}
+
+	// Erst jetzt buchen: alles davor kann noch scheitern.
+	rateLimitConsume()
 
 	audit("SEND_AUTHORIZED recipient=%s media=%q mode=%s", recipient, mediaPath, mode)
 	return nil
