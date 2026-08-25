@@ -20,7 +20,7 @@ Der Upstream ist unbetreibbar: er verbindet sich nicht mehr, und dort wo er es t
 | 9 | Start bricht ab, wenn `SEND_MODE=confirm` ohne Terminal gesetzt ist | Sonst läuft die Bridge scheinbar normal und lehnt jeden Versand am nicht lesbaren Prompt ab. |
 | 10 | Sendekontingent überlebt Neustarts | Ein In-Memory-Limit setzt sich bei jedem Absturz zurück, und genau dieses Limit schützt den einzigen belegten Ban-Pfad. |
 | 11 | Audit-Log rotiert bei 5 MB, Warnung bei Bind ausserhalb Loopback | Das forensische Log wuchs unbegrenzt, und ein abweichender Bind blieb unkommentiert. |
-| 12 | CI: Build, Vet, Test mit `-race`, `govulncheck`, wöchentlich | Früherkennung, wenn eine Abhängigkeit oder das Protokoll bricht. |
+| 12 | CI: Build, Vet, Test mit `-race`, `govulncheck`, wöchentlich | Früherkennung, wenn eine Abhängigkeit oder das Protokoll bricht. Seit 25.08.2026 grün. Der wöchentliche Cron löst erst aus, wenn dieser Branch der Default-Branch ist. |
 
 ## Konfiguration
 
