@@ -22,10 +22,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          # Die Version kommt aus go.mod. Ein fester Pin laesst govulncheck
-          # gegen eine veraltete Standardbibliothek laufen und meldet Vulns,
-          # die den gebauten Code nie betreffen.
-          go-version-file: whatsapp-bridge/go.mod
+          # Immer die aktuelle stabile Go-Version. Weder ein fester Pin noch
+          # die Zeile aus go.mod taugen hier: go.mod nennt die Mindestversion
+          # der Sprache, keinen Toolchain-Stand. govulncheck wuerde sonst gegen
+          # eine veraltete Standardbibliothek laufen und deren Patch-Rueckstand
+          # als Befund melden statt echter Schwachstellen im Code.
+          go-version: "stable"
+          check-latest: true
           cache-dependency-path: whatsapp-bridge/go.sum
 
       - name: Build
