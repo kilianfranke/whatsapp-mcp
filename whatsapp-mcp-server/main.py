@@ -1,3 +1,4 @@
+import os
 from typing import List, Dict, Any, Optional
 from mcp.server.fastmcp import FastMCP
 from whatsapp import (
@@ -17,6 +18,20 @@ from whatsapp import (
 
 # Initialize FastMCP server
 mcp = FastMCP("whatsapp")
+
+# Die Sende-Werkzeuge werden nur registriert, wenn sie ausdruecklich verlangt
+# sind. Im Lesebetrieb sind sie nutzlose Angriffsflaeche: eine praeparierte
+# eingehende Nachricht kann kein Werkzeug missbrauchen, das dem Agenten gar
+# nicht angeboten wird. Die Bridge sperrt den Versand zusaetzlich serverseitig
+# ueber WHATSAPP_BRIDGE_SEND_MODE; beide Schalter muessen offen sein.
+SEND_TOOLS_ENABLED = os.environ.get("WHATSAPP_MCP_ENABLE_SEND", "").strip().lower() in ("1", "true", "yes")
+
+
+def send_tool():
+    """Registriert ein Werkzeug nur bei aktivierten Sende-Werkzeugen."""
+    if SEND_TOOLS_ENABLED:
+        return mcp.tool()
+    return lambda fn: fn
 
 @mcp.tool()
 def search_contacts(query: str) -> List[Dict[str, Any]]:
@@ -154,7 +169,7 @@ def get_message_context(
     context = whatsapp_get_message_context(message_id, before, after)
     return context
 
-@mcp.tool()
+@send_tool()
 def send_message(
     recipient: str,
     message: str
@@ -183,7 +198,7 @@ def send_message(
         "message": status_message
     }
 
-@mcp.tool()
+@send_tool()
 def send_file(recipient: str, media_path: str) -> Dict[str, Any]:
     """Send a file such as a picture, raw audio, video or document via WhatsApp to the specified recipient. For group messages use the JID.
     
@@ -203,7 +218,7 @@ def send_file(recipient: str, media_path: str) -> Dict[str, Any]:
         "message": status_message
     }
 
-@mcp.tool()
+@send_tool()
 def send_audio_message(recipient: str, media_path: str) -> Dict[str, Any]:
     """Send any audio file as a WhatsApp audio message to the specified recipient. For group messages use the JID. If it errors due to ffmpeg not being installed, use send_file instead.
     

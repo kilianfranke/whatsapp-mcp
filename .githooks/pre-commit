@@ -1,0 +1,23 @@
+#!/bin/sh
+# Letzte Bremse vor dem oeffentlichen Repo.
+#
+# Das Arbeitsverzeichnis enthaelt die komplette WhatsApp-Historie im Klartext,
+# den API-Key und die Session-Credentials. Die .gitignore haelt das normalerweise
+# heraus -- aber ein `git add -f`, eine verlorene Ignore-Zeile oder ein
+# umbenanntes Verzeichnis reichen, und alles liegt auf GitHub. Dieser Hook
+# prueft, was tatsaechlich im Index steht, nicht was ignoriert sein sollte.
+
+blocked=$(git diff --cached --name-only --diff-filter=AM | grep -E '(^|/)store/|\.db$|\.db-journal$|\.db-wal$|(^|/)api_key$|\.log$' || true)
+
+if [ -n "$blocked" ]; then
+	echo "COMMIT ABGEBROCHEN: private Laufzeitdaten im Index." >&2
+	echo "" >&2
+	echo "$blocked" | sed 's/^/  /' >&2
+	echo "" >&2
+	echo "Diese Dateien enthalten Chat-Historie, API-Key oder Session-Daten." >&2
+	echo "Das Repo ist oeffentlich. Entfernen mit:" >&2
+	echo "  git restore --staged <datei>" >&2
+	echo "" >&2
+	echo "Nur wenn du sicher bist, dass die Datei harmlos ist: --no-verify." >&2
+	exit 1
+fi
